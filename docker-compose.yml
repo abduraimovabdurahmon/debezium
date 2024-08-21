@@ -1,0 +1,123 @@
+version: "3.8"
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    platform: linux/amd64
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - pg-kafka-network
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    platform: linux/amd64
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_HEAP_OPTS: "-Xmx4g -Xms4g"
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - pg-kafka-network
+    ports:
+      - "9092:9092"
+
+  producer-database:
+    image: postgis/postgis:12-3.1
+    platform: linux/amd64
+    environment:
+      POSTGRES_USER: producer
+      POSTGRES_PASSWORD: producer
+      POSTGRES_DB: producerdb
+    volumes:
+      - producer-data:/var/lib/postgresql/data
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=4"
+      - "-c"
+      - "max_wal_senders=4"
+    networks:
+      - pg-kafka-network
+
+  consumer-database:
+    image: postgis/postgis:12-3.1
+    platform: linux/amd64
+    environment:
+      POSTGRES_USER: consumer
+      POSTGRES_PASSWORD: consumer
+      POSTGRES_DB: consumerdb
+    volumes:
+      - consumer-data:/var/lib/postgresql/data
+    networks:
+      - pg-kafka-network
+
+  connect:
+    image: jomiy/connect:latest
+    platform: linux/amd64
+    depends_on:
+      - kafka
+    environment:
+      BOOTSTRAP_SERVERS: "kafka:9092"
+      CONFIG_STORAGE_TOPIC: my_connect_configs
+      OFFSET_STORAGE_TOPIC: my_connect_offsets
+      STATUS_STORAGE_TOPIC: my_connect_statuses
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+    ports:
+      - "8083:8083"
+    networks:
+      - pg-kafka-network
+
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    platform: linux/amd64
+    depends_on:
+      - kafka
+    ports:
+      - "8082:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: "local"
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka:9092"
+    networks:
+      - pg-kafka-network
+
+  debezium-ui:
+    image: debezium/debezium-ui:latest    
+    platform: linux/amd64
+    depends_on:
+      - connect
+    ports:
+      - "8084:8080"
+    environment:
+      KAFKA_CONNECT_URIS: "http://connect:8083"
+    networks:
+      - pg-kafka-network
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    platform: linux/amd64
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@gmail.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - 5050:80
+    networks:
+      - pg-kafka-network
+    logging:
+      driver: json-file
+
+
+networks:
+  pg-kafka-network:
+    driver: bridge
+
+volumes:
+  producer-data:
+  consumer-data:

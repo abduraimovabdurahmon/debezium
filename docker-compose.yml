@@ -1,83 +1,142 @@
-version: "3.8"
+version: '3.8'
 services:
+  # Zookeeper
   zookeeper:
-    image: confluentinc/cp-zookeeper:latest
-    platform: linux/amd64
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
+    image: quay.io/debezium/zookeeper:3.0
+    ports:
+      - 2181:2181
+      - 2888:2888
+      - 3888:3888
     networks:
       - pg-kafka-network
-
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: ["node.labels.debezium == true"]
+    
+  # Kafka
   kafka:
-    image: confluentinc/cp-kafka:latest
-    platform: linux/amd64
+    image: quay.io/debezium/kafka:3.0
     depends_on:
       - zookeeper
     environment:
-      KAFKA_HEAP_OPTS: "-Xmx4g -Xms4g"
+      ZOOKEEPER_CONNECT: zookeeper:2181
+      HEAP_OPTS: "-Xms512m -Xmx15g"
+      ADVERTISED_LISTENERS: INSIDE://kafka:9092,OUTSIDE://192.168.112.32:9093
+      LISTENER_SECURITY_PROTOCOL_MAP: INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+      LISTENERS: INSIDE://0.0.0.0:9092,OUTSIDE://0.0.0.0:9093
+      INTER_BROKER_LISTENER_NAME: INSIDE
+      AUTO_CREATE_TOPICS_ENABLE: "true"
+      OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      MESSAGE_MAX_BYTES: 104858800 # Set to 100 MB
+      REPLICA_FETCH_MAX_BYTES: 104858800 # Set to 100 MB
+      MAX_REQUEST_SIZE: 104858800 # Set to 100 MB
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_HEAP_OPTS: "-Xms512m -Xmx15g"
+      KAFKA_ADVERTISED_LISTENERS: INSIDE://kafka:9092,OUTSIDE://192.168.112.32:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+      KAFKA_LISTENERS: INSIDE://0.0.0.0:9092,OUTSIDE://0.0.0.0:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-    networks:
-      - pg-kafka-network
+      KAFKA_MESSAGE_MAX_BYTES: 104858800 # Set to 100 MB
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 104858800 # Set to 100 MB
+      KAFKA_MAX_REQUEST_SIZE: 104858800 # Set to 100 MB
     ports:
-      - "9092:9092"
-
-  producer-database:
-    image: postgis/postgis:12-3.1
-    platform: linux/amd64
-    environment:
-      POSTGRES_USER: producer
-      POSTGRES_PASSWORD: producer
-      POSTGRES_DB: producerdb
-    volumes:
-      - producer-data:/var/lib/postgresql/data
-    command:
-      - "postgres"
-      - "-c"
-      - "wal_level=logical"
-      - "-c"
-      - "max_replication_slots=4"
-      - "-c"
-      - "max_wal_senders=4"
+      - "9092:9092"  # Inside
+      - "9093:9093"  # Outside
     networks:
       - pg-kafka-network
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: ["node.labels.debezium == true"]
 
+  # Debezium connect
+  connect:
+    image: jomiy/connect
+    ports:
+      - 8083:8083
+      - 1976:1976
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: 1
+      CONFIG_STORAGE_TOPIC: my_connect_configs
+      OFFSET_STORAGE_TOPIC: my_connect_offsets
+      STATUS_STORAGE_TOPIC: my_connect_statuses
+      KAFKA_OPTS: -javaagent:/kafka/etc/jmx_prometheus_javaagent.jar=8080:/kafka/etc/config.yml
+      JMXHOST: localhost
+      JMXPORT: 1976
+      CONNECT_BOOTSTRAP_SERVERS: "kafka:9092"
+      CONNECT_GROUP_ID: my_connect_group
+      CONNECT_CONFIG_STORAGE_TOPIC: my_connect_configs
+      CONNECT_OFFSET_STORAGE_TOPIC: my_connect_offsets
+      CONNECT_STATUS_STORAGE_TOPIC: my_connect_statuses
+      CONNECT_CONFIG_STORAGE_TOPIC_REPLICATION_FACTOR:
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_PRODUCER_MAX_REQUEST_SIZE: 2147483647
+      CONNECT_PRODUCER_BUFFER_MEMORY: 134217728  # Set to 128 MB
+      CONNECT_LOG4J_ROOT_LOGLEVEL: TRACE
+      ADVERTISED_LISTENERS: http://connect:8083
+      KAFKA_HEAP_OPTS: "-Xms1g -Xmx15g"
+      CONNECT_HEAP: "15g"
+      CONNECT_LOG_DIR: "/kafka/logs" 
+    depends_on:
+      - kafka
+    networks:
+      - pg-kafka-network
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: ["node.labels.debezium == true"]
+
+  # Schema Registry
+  schema-registry:
+    image: confluentinc/cp-schema-registry:latest
+    depends_on:
+      - kafka
+    environment:
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    ports:
+      - "8081:8081"
+    networks:
+      - pg-kafka-network
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: ["node.labels.debezium == true"]
+
+  # Consumer Database
   consumer-database:
-    image: postgis/postgis:12-3.1
-    platform: linux/amd64
+    image: postgis/postgis:latest
     environment:
       POSTGRES_USER: consumer
       POSTGRES_PASSWORD: consumer
       POSTGRES_DB: consumerdb
-    volumes:
-      - consumer-data:/var/lib/postgresql/data
-    networks:
-      - pg-kafka-network
-
-  connect:
-    image: jomiy/connect:latest
-    platform: linux/amd64
-    depends_on:
-      - kafka
-    environment:
-      BOOTSTRAP_SERVERS: "kafka:9092"
-      CONFIG_STORAGE_TOPIC: my_connect_configs
-      OFFSET_STORAGE_TOPIC: my_connect_offsets
-      STATUS_STORAGE_TOPIC: my_connect_statuses
-      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
     ports:
-      - "8083:8083"
+      - "5432:5432"
+    command: postgres -c 'max_connections=20000'
+    volumes:
+      - consumer-volume:/var/lib/postgresql/data
     networks:
       - pg-kafka-network
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: ["node.labels.postgres == true"]
 
-
+  # Kafka UI
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
-    platform: linux/amd64
     depends_on:
       - kafka
     ports:
@@ -87,10 +146,15 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka:9092"
     networks:
       - pg-kafka-network
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: ["node.labels.debezium == true"]
 
+  # Debezium UI
   debezium-ui:
-    image: debezium/debezium-ui:latest    
-    platform: linux/amd64
+    image: debezium/debezium-ui:latest
     depends_on:
       - connect
     ports:
@@ -99,10 +163,15 @@ services:
       KAFKA_CONNECT_URIS: "http://connect:8083"
     networks:
       - pg-kafka-network
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: ["node.labels.debezium == true"]
 
+  # pgAdmin
   pgadmin:
     image: dpage/pgadmin4:latest
-    platform: linux/amd64
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@gmail.com
       PGADMIN_DEFAULT_PASSWORD: admin
@@ -112,12 +181,49 @@ services:
       - pg-kafka-network
     logging:
       driver: json-file
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: ["node.labels.postgres == true"]
+
+  # Prometheus
+  prometheus:
+    image: jomiy/prometheus
+    ports:
+      - 9090:9090
+    depends_on:
+      - connect
+    networks:
+      - pg-kafka-network
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: ["node.labels.debezium == true"]
+
+  # Grafana
+  grafana:
+    image: jomiy/grafana:latest
+    ports:
+      - 3000:3000
+    environment:
+      DS_PROMETHEUS: prometheus
+    depends_on:
+      - prometheus
+    networks:
+      - pg-kafka-network
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: ["node.labels.debezium == true"]
 
 
 networks:
   pg-kafka-network:
-    driver: bridge
+    driver: overlay
+    external: true
 
 volumes:
-  producer-data:
-  consumer-data:
+  consumer-volume:
